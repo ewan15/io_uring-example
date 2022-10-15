@@ -10,7 +10,7 @@
 #include <unistd.h>
 #include <string.h>
 
-#include <iouring.h>
+#include <linux/io_uring.h>
 
 #define QUEUE_DEPTH 1
 #define BLOCK_SZ    1024
@@ -25,7 +25,7 @@ struct app_io_sq_ring {
     unsigned *ring_entries;
     unsigned *flags;
     unsigned *array;
-}
+};
 
 struct app_io_cq_ring {
     unsigned *head;
@@ -33,19 +33,19 @@ struct app_io_cq_ring {
     unsigned *ring_mask;
     unsigned *ring_entries;
     struct io_uring_cqe *cqes;
-}
+};
 
 struct submitter {
     int ring_fd;
     struct app_io_sq_ring sq_ring;
     struct io_uring_sqe *sqes;
     struct app_io_cq_ring cq_ring;
-}
+};
 
 struct file_info {
     off_t file_sz;
     struct iovec iovecs[];
-}
+};
 
 int io_uring_setup(unsigned entries, struct io_uring_params *p)
 {
@@ -56,7 +56,7 @@ int io_uring_enter(int ring_fd, unsigned int to_submit,
                             unsigned int min_complete, unsigned int flag)
 {
     return (int) syscall(__NR_io_uring_enter, ring_fd, to_submit, min_complete,
-                    flags, NULL, 0);
+                    flag, NULL, 0);
 }
 
 off_t get_file_size(int fd) {
@@ -82,7 +82,7 @@ off_t get_file_size(int fd) {
 
 int app_setup_uring(struct submitter *s) {
     struct app_io_sq_ring *sring = &s->sq_ring;
-    struct app_io_cq_ring *sring = &s->cq_ring;
+    struct app_io_cq_ring *cring = &s->cq_ring;
     struct io_uring_params p;
 
     void *sq_ptr, *cq_ptr;
@@ -95,7 +95,7 @@ int app_setup_uring(struct submitter *s) {
     }
 
     int sring_sz = p.sq_off.array + p.sq_entries * sizeof(unsigned);
-    int cring_sz = p.cq_off.array + p.cq_entries * sizeof(strut io_uring_cqe);
+    int cring_sz = p.cq_off.cqes + p.cq_entries * sizeof(struct io_uring_cqe);
 
     if (p.features & IORING_FEAT_SINGLE_MMAP) {
         if (cring_sz > sring_sz) {
@@ -117,7 +117,7 @@ int app_setup_uring(struct submitter *s) {
     } else {
         cq_ptr = mmap(0, cring_sz, PROT_READ | PROT_WRITE,
                 MAP_SHARED | MAP_POPULATE,
-                s->ring, IORING_OF_SQ_RING)
+                s->ring_fd, IORING_OFF_SQ_RING);
         if (sq_ptr == MAP_FAILED) {
             perror("mmap");
             return 1;
@@ -170,7 +170,7 @@ void read_from_cq(struct submitter *s) {
         cqe = &cring->cqes[head & *s->cq_ring.ring_mask];
         fi = (struct file_info*) cqe->user_data;
         if (cqe->res < 0)
-            fprinf(stderr, "ERROR: %s\n", strerror(abs(cqe->res)));
+            fprintf(stderr, "ERROR: %s\n", strerror(abs(cqe->res)));
 
         int blocks = (int) fi->file_sz / BLOCK_SZ;
         if (fi->file_sz % BLOCK_SZ) blocks++;
@@ -185,7 +185,7 @@ void read_from_cq(struct submitter *s) {
     write_barrier();
 }
 
-void submit_to_sq(char *file_path, struct submitter *s) {
+int submit_to_sq(char *file_path, struct submitter *s) {
     struct file_info *fi;
 
     int file_fd = open(file_path, O_RDONLY);
@@ -204,7 +204,7 @@ void submit_to_sq(char *file_path, struct submitter *s) {
     int blocks = (int) file_sz / BLOCK_SZ;
     if (file_sz % BLOCK_SZ) blocks++;
 
-    fi = malloc(sizeof(*fi) + sizeof(struct iovec) * block);
+    fi = malloc(sizeof(*fi) + sizeof(struct iovec) * blocks);
     if (!fi) {
         fprintf(stderr, "Unabled to allocate memory");
         return 1;
@@ -216,7 +216,7 @@ void submit_to_sq(char *file_path, struct submitter *s) {
         if (bytes_to_read > BLOCK_SZ)
             bytes_to_read = BLOCK_SZ;
 
-        fi->iovec[current_block].iov_len = bytes_to_read;
+        fi->iovecs[current_block].iov_len = bytes_to_read;
 
         void *buf;
         if (posix_memalign(&buf, BLOCK_SZ, BLOCK_SZ)) {
@@ -237,7 +237,7 @@ void submit_to_sq(char *file_path, struct submitter *s) {
     sqe->fd = file_fd;
     sqe->flags = 0;
     sqe->opcode = IORING_OP_READV;
-    seq->addr = (unsigned long long) fi;
+    sqe->addr = (unsigned long long) fi;
     sring->array[index] = index;
     tail = next_tail;
 
@@ -270,9 +270,19 @@ int main(int argc, char* argv[]) {
     }
     memset(s, 0, sizeof(*s));
 
-    if (!s) {
-        perror("malloc");
+    if (app_setup_uring(s)) {
+        perror("unable to setup uring");
         return 1;
     }
+
+    for (int i = 1; i < argc; i++) {
+    	if(submit_to_sq(argv[i], s)) {
+	    fprintf(stderr, "Error reading file\n");
+	    return 1;
+	}
+	read_from_cq(s);
+    }
+
+    return 0;
 }
 
