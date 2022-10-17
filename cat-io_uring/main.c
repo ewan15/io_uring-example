@@ -237,7 +237,10 @@ int submit_to_sq(char *file_path, struct submitter *s) {
     sqe->fd = file_fd;
     sqe->flags = 0;
     sqe->opcode = IORING_OP_READV;
-    sqe->addr = (unsigned long long) fi;
+    sqe->addr = (unsigned long long) fi->iovecs;
+    sqe->len = blocks;
+    sqe->off = 0;
+    sqe->user_data = (unsigned long long) fi;
     sring->array[index] = index;
     tail = next_tail;
 
@@ -259,7 +262,7 @@ int main(int argc, char* argv[]) {
     struct submitter *s;
 
     if (argc < 2) {
-        fprintf(stderr, "Usage: %s <filename\n>", argv[0]);
+        fprintf(stderr, "Usage: %s <filename>\n", argv[0]);
         return 1;
     }
 
