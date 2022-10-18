@@ -6,6 +6,8 @@ pkgs.mkShell {
     pkgs.linuxHeaders
     pkgs.glibc
     pkgs.clang
+    pkgs.liburing
   ];
+  LD_LIBRARY_PATH = "${pkgs.lib.makeLibraryPath [ pkgs.liburing ] }";
 }
 
